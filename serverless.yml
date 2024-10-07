@@ -1,0 +1,182 @@
+service: serverless-challenge
+
+plugins:
+  - serverless-offline
+
+package:
+  patterns:
+    - '!node_modules/**'
+    - '!venv/**'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  environment:
+    AWS_REGION: us-east-1
+    AWS_ENDPOINT: http://localhost:4566
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    APPOINTMENT_TABLE: Appointment
+    SNS_APPOINTMENT: arn:aws:sns:us-east-1:000000000000:SNS_APPOINTMENT
+    RDS_NAME_PE: rds_pe
+    RDS_HOST_PE: rds-host-pe
+    RDS_USER_PE: rds-username-pe
+    RDS_PASSWORD_PE: rds-password-pe
+    RDS_DB_PE: db
+    RDS_NAME_CL: rds_cl
+    RDS_HOST_CL: rds-host-cl
+    RDS_USER_CL: rds-username-cl
+    RDS_PASSWORD_CL: rds-password-cl
+    RDS_DB_CL: db
+    EVENT_BUS_NAME: event-bus-appointments
+  iam:
+    role:
+      statements:
+        - Effect: 'Allow'
+          Action:
+            - 'dynamodb:*'
+            - 'sqs:*'
+            - 'sns:*'
+            - 'events:*'
+          Resource: '*'
+
+functions:
+  appointment:
+    handler: dist/infrastructure/lambdas/appointment.handler
+    events:
+      - http:
+          path: appointments
+          method: post
+      - http:
+          path: appointments/{id}
+          method: get
+      - sqs:
+          arn: !GetAtt APPQueue.Arn
+
+  appointment_pe:
+    handler: dist/infrastructure/lambdas/appointment_pe.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [PeQueue, Arn]
+          batchSize: 10
+
+  appointment_cl:
+    handler: dist/infrastructure/lambdas/appointment_cl.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ClQueue, Arn]
+          batchSize: 10
+
+resources:
+  Resources:
+    AppointmentTable:
+      Type: 'AWS::DynamoDB::Table'
+      Properties:
+        TableName: ${self:provider.environment.APPOINTMENT_TABLE}
+        AttributeDefinitions:
+          - AttributeName: appointmentId
+            AttributeType: S
+          - AttributeName: insuredId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: appointmentId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: InsuredIdIndex
+            KeySchema:
+              - AttributeName: insuredId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 5
+              WriteCapacityUnits: 5
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+
+    SNSTopicAppointment:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: SNS_APPOINTMENT
+
+    PeQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: SQS_PE
+
+    ClQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: SQS_CL
+
+    APPQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: SQS_APP
+
+    SNSSQSPeSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: SNSTopicAppointment
+        Protocol: sqs
+        Endpoint:
+          Fn::GetAtt: [PeQueue, Arn]
+        FilterPolicy:
+          type:
+            - 'PE'
+
+    SNSSQSClSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: SNSTopicAppointment
+        Protocol: sqs
+        Endpoint:
+          Fn::GetAtt: [ClQueue, Arn]
+        FilterPolicy:
+          type:
+            - 'CL'
+
+    AppointmentEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:provider.environment.EVENT_BUS_NAME}
+
+    AppointmentCompletedRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: ${self:provider.environment.EVENT_BUS_NAME}
+        EventPattern:
+          source:
+            - 'appointment.completed'
+          detail-type:
+            - 'AppointmentCompleted'
+        Targets:
+          - Arn: !GetAtt APPQueue.Arn
+            Id: SQSAPPTarget
+
+  Outputs:
+    DynamoTableName:
+      Description: 'Appointment table'
+      Value: ${self:provider.environment.APPOINTMENT_TABLE}
+
+    SQS_PE_QueueURL:
+      Value:
+        Ref: PeQueue
+    SQS_CL_QueueURL:
+      Value:
+        Ref: ClQueue
+    SNS_APPOINTMENT_TopicARN:
+      Value:
+        Ref: SNSTopicAppointment
+    SQS_APP_QueueURL:
+      Value:
+        Ref: APPQueue
+
+    EventBusName:
+      Description: 'EventBridge Bus Name'
+      Value: ${self:provider.environment.EVENT_BUS_NAME}
